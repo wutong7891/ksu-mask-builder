@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -68,8 +69,19 @@ def out(**kw) -> None:
         print(f"{k}={v}")
 
 
+SECRET_FLAGS = {"-storepass", "-keypass", "-ks-pass", "-key-pass"}
+
+
+def redact(cmd) -> str:
+    parts = [str(c) for c in cmd]
+    for i, part in enumerate(parts):
+        if part in SECRET_FLAGS and i + 1 < len(parts):
+            parts[i + 1] = "******"
+    return " ".join(parts)
+
+
 def run(cmd, cwd=None, env=None, check=True, capture=False):
-    log("$ " + " ".join(str(c) for c in cmd))
+    log("$ " + redact(cmd))
     proc = subprocess.run(
         [str(c) for c in cmd],
         cwd=str(cwd) if cwd else None,
@@ -81,7 +93,7 @@ def run(cmd, cwd=None, env=None, check=True, capture=False):
     if proc.stdout:
         log(proc.stdout.rstrip())
     if check and proc.returncode != 0:
-        raise ToolError(f"命令失败（{proc.returncode}）: {' '.join(str(c) for c in cmd)}")
+        raise ToolError(f"命令失败（{proc.returncode}）: {redact(cmd)}")
     return proc
 
 
@@ -195,6 +207,83 @@ def cmd_fetch(args) -> None:
 # --------------------------------------------------------------------------- #
 # 签名私钥
 # --------------------------------------------------------------------------- #
+def _write_key_outputs(keys_dir: Path, pkg: str, alias: str, password: str, der_bytes: bytes) -> dict:
+    (keys_dir / "keystore.env").write_text(
+        "KEYSTORE_FILE=release.jks\n"
+        f"KEYSTORE_PASSWORD={password}\n"
+        f"KEY_ALIAS={alias}\n"
+        f"KEY_PASSWORD={password}\n"
+        f"CERT_SHA256={hashlib.sha256(der_bytes).hexdigest()}\n"
+        f"CERT_SIZE_HEX=0x{len(der_bytes):04x}\n",
+        encoding="utf-8",
+    )
+    os.chmod(keys_dir / "keystore.env", 0o600)
+    keylib = {
+        "package": pkg,
+        "alias": alias,
+        "cert_sha256": hashlib.sha256(der_bytes).hexdigest(),
+        "cert_size": len(der_bytes),
+        "cert_size_hex": f"0x{len(der_bytes):04x}",
+    }
+    (keys_dir / "signature.json").write_text(
+        json.dumps(keylib, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    return {
+        "alias": alias,
+        "password": password,
+        "cert_sha256": keylib["cert_sha256"],
+        "cert_size": len(der_bytes),
+        "keystore": str(keys_dir / "release.jks"),
+    }
+
+
+def export_der(ks: Path, alias: str, password: str, env: dict) -> bytes:
+    """从 keystore 导出证书 DER，自动适配 JKS / PKCS12。"""
+    der = ks.parent / "release.der"
+    last = ""
+    for extra in ([], ["-storetype", "PKCS12"], ["-storetype", "JKS"]):
+        if der.exists():
+            der.unlink()
+        proc = subprocess.run(
+            ["keytool", "-exportcert", "-keystore", str(ks), "-alias", alias,
+             "-storepass", password, "-file", str(der)] + extra,
+            text=True, capture_output=True, env=env,
+        )
+        if proc.returncode == 0 and der.exists():
+            return der.read_bytes()
+        last = (proc.stdout + proc.stderr).strip()
+    raise ToolError(f"无法从 keystore 导出证书（alias 或密码不对？）: {last[:300]}")
+
+
+def load_fixed_keystore(keys_dir: Path, pkg: str) -> dict:
+    """使用仓库 Secrets 里的固定私钥，保证多次构建签名一致。"""
+    b64 = (os.environ.get("KSU_KEYSTORE_B64") or "").strip()
+    password = os.environ.get("KSU_KEYSTORE_PASS") or ""
+    alias = (os.environ.get("KSU_KEY_ALIAS") or "").strip()
+    missing = [n for n, v in (("KSU_KEYSTORE_B64", b64), ("KSU_KEYSTORE_PASS", password),
+                              ("KSU_KEY_ALIAS", alias)) if not v]
+    if missing:
+        raise ToolError("use_fixed_key 已开启，但缺少 Secret: " + ", ".join(missing))
+
+    keys_dir.mkdir(parents=True, exist_ok=True)
+    ks = keys_dir / "release.jks"
+    try:
+        ks.write_bytes(base64.b64decode(b64, validate=True))
+    except Exception as exc:  # noqa: BLE001
+        raise ToolError(f"KSU_KEYSTORE_B64 不是合法 base64: {exc}") from exc
+
+    env = dict(os.environ, LANG="C", LC_ALL="C")
+    der_bytes = export_der(ks, alias, password, env)
+    subprocess.run(
+        ["keytool", "-exportcert", "-rfc", "-keystore", str(ks),
+         "-alias", alias, "-storepass", password],
+        capture_output=True, text=True, env=env,
+    )
+    info = _write_key_outputs(keys_dir, pkg, alias, password, der_bytes)
+    log(f"[i] 使用固定私钥，证书指纹 {info['cert_sha256']}")
+    return info
+
+
 def generate_keystore(keys_dir: Path, pkg: str) -> dict:
     keys_dir.mkdir(parents=True, exist_ok=True)
     alias = "ksu-" + os.urandom(4).hex()
@@ -218,51 +307,14 @@ def generate_keystore(keys_dir: Path, pkg: str) -> dict:
         "-dname", f"CN={pkg}, OU=KSU Mask Builder, O=KSU Mask Builder, C=CN",
     ], env=env, capture=True)
 
-    der = keys_dir / "release.der"
-    run([
-        "keytool", "-exportcert",
-        "-keystore", str(ks),
-        "-alias", alias,
-        "-storepass", password,
-        "-file", str(der),
-    ], env=env, capture=True)
-    (keys_dir / "release.pem").write_text(
-        subprocess.run(
-            ["keytool", "-exportcert", "-rfc", "-keystore", str(ks),
-             "-alias", alias, "-storepass", password],
-            check=True, capture_output=True, text=True, env=env,
-        ).stdout,
-        encoding="utf-8",
+    der_bytes = export_der(ks, alias, password, env)
+    subprocess.run(
+        ["keytool", "-exportcert", "-rfc", "-keystore", str(ks),
+         "-alias", alias, "-storepass", password],
+        capture_output=True, text=True, env=env,
     )
-
-    der_bytes = der.read_bytes()
-    info = {
-        "alias": alias,
-        "password": password,
-        "cert_sha256": hashlib.sha256(der_bytes).hexdigest(),
-        "cert_size": len(der_bytes),
-        "keystore": str(ks),
-    }
-    (keys_dir / "keystore.env").write_text(
-        "KEYSTORE_FILE=release.jks\n"
-        f"KEYSTORE_PASSWORD={password}\n"
-        f"KEY_ALIAS={alias}\n"
-        f"KEY_PASSWORD={password}\n"
-        f"CERT_SHA256={info['cert_sha256']}\n"
-        f"CERT_SIZE_HEX=0x{len(der_bytes):04x}\n",
-        encoding="utf-8",
-    )
-    os.chmod(keys_dir / "keystore.env", 0o600)
-    keylib = {
-        "package": pkg,
-        "alias": alias,
-        "cert_sha256": info["cert_sha256"],
-        "cert_size": len(der_bytes),
-        "cert_size_hex": f"0x{len(der_bytes):04x}",
-    }
-    (keys_dir / "signature.json").write_text(
-        json.dumps(keylib, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
+    info = _write_key_outputs(keys_dir, pkg, alias, password, der_bytes)
+    log(f"[i] 已生成新私钥，证书指纹 {info['cert_sha256']}")
     return info
 
 
@@ -360,7 +412,8 @@ def cmd_prepare(args) -> None:
         raise ToolError(f"{manager} 不是 KernelSU manager 目录")
 
     version_code = int(args.code) if args.code else derive_version_code(args.pkg, args.version)
-    info = generate_keystore(keys_dir, args.pkg)
+    use_fixed = (os.environ.get("USE_FIXED_KEY") or "").strip().lower() in ("1", "true", "yes")
+    info = load_fixed_keystore(keys_dir, args.pkg) if use_fixed else generate_keystore(keys_dir, args.pkg)
     patch_manager_gradle(manager, args.version, version_code)
     write_signing_props(manager, keys_dir, info)
     abis = install_ksud(manager, args.tag, Path(args.base_apk) if args.base_apk else None)
@@ -371,6 +424,7 @@ def cmd_prepare(args) -> None:
         CERT_SIZE=info["cert_size"],
         VERSION_CODE=version_code,
         ABI_LIST=",".join(abis),
+        KEY_MODE="fixed" if use_fixed else "generated",
     )
 
 
