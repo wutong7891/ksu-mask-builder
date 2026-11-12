@@ -42,11 +42,22 @@ jobs:
           gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" -n "$ARTIFACT" -D dist
           ls -l dist
 
-      - name: 推到 apk-artifacts 分支
+      - name: 推到 apk-only 分支（单文件，便于整包下载）
         run: |
           set -euo pipefail
           git config user.name "ksu-mask-bot"
           git config user.email "bot@users.noreply.github.com"
+          git checkout --orphan apk-only
+          git rm -rf . --quiet || true
+          cp dist/*.apk .
+          git add -f ./*.apk
+          git commit -m "apk-only: $(date -u +%Y%m%dT%H%M%SZ)"
+          git push -f origin apk-only
+          ls -l ./*.apk
+
+      - name: 推到 apk-artifacts 分支（分片）
+        run: |
+          set -euo pipefail
           git checkout --orphan apk-artifacts
           git rm -rf . --quiet || true
           mkdir -p apk/chunks
@@ -54,7 +65,7 @@ jobs:
           cp dist/SIGNATURE.txt dist/report.json apk/ 2>/dev/null || true
           # 分片：方便受限网络逐块拉取、断点重试
           APK=$(ls apk/*.apk | head -1)
-          split -b 1048576 -d -a 3 "$APK" apk/chunks/part-
+          split -b 262144 -d -a 3 "$APK" apk/chunks/part-
           {
             echo "file=$(basename "$APK")"
             echo "size=$(stat -c%s "$APK")"
