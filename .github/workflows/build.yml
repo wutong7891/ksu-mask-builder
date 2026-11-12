@@ -46,6 +46,11 @@ on:
         required: false
         type: string
         default: "20260828"
+      upload_keys:
+        description: "把本次私钥一起上传为产物（仓库公开时千万别开）"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -158,11 +163,18 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: mask-apk
-          path: |
-            dist/
-            keys/
+          path: dist/
           if-no-files-found: error
           retention-days: 30
+
+      - name: 上传私钥（仅私有仓库时开启）
+        if: ${{ inputs.upload_keys }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: mask-keys
+          path: keys/
+          if-no-files-found: error
+          retention-days: 7
 
   lkm:
     name: kernelsu.ko · ${{ matrix.kmi }}
