@@ -49,10 +49,20 @@ jobs:
           git config user.email "bot@users.noreply.github.com"
           git checkout --orphan apk-artifacts
           git rm -rf . --quiet || true
-          mkdir -p apk
+          mkdir -p apk/chunks
           cp dist/*.apk apk/
           cp dist/SIGNATURE.txt dist/report.json apk/ 2>/dev/null || true
+          # 分片：方便受限网络逐块拉取、断点重试
+          APK=$(ls apk/*.apk | head -1)
+          split -b 1048576 -d -a 3 "$APK" apk/chunks/part-
+          {
+            echo "file=$(basename "$APK")"
+            echo "size=$(stat -c%s "$APK")"
+            echo "sha256=$(sha256sum "$APK" | cut -d' ' -f1)"
+            echo "parts=$(ls apk/chunks | wc -l)"
+          } > apk/chunks.txt
           git add -f apk
           git commit -m "apk: $(date -u +%Y%m%dT%H%M%SZ)"
           git push -f origin apk-artifacts
-          ls -l apk
+          cat apk/chunks.txt
+          ls -l apk/chunks | head -3
