@@ -70,6 +70,33 @@ KernelSU 的内核并不认识「包名」，它校验的是**面具 APK 的签�
 > Billing 拦截，所以仓库目前是公开的，因此默认不产出私钥。要保留私钥请先处理
 > Billing，再把仓库改回私有。
 
+## 固定私钥（可选）
+
+默认每次构建都换新私钥。若想让多次构建签出**同一个签名**（这样升级面具不用卸载、
+`kernelsu.ko` 也能一直复用），把私钥放进仓库 Secrets：
+
+1. 本地生成一把自己的 keystore（一次性）：
+
+   ```bash
+   keytool -genkeypair -keystore mykey.jks -storetype PKCS12 \
+     -alias mymask -keyalg RSA -keysize 4096 -validity 36500 \
+     -dname "CN=com.mymask.app, O=My Mask, C=CN"
+   base64 -w0 mykey.jks > mykey.b64
+   ```
+
+2. 仓库 **Settings → Secrets and variables → Actions** 新建三个 Secret：
+
+   | Secret | 内容 |
+   | --- | --- |
+   | `KSU_KEYSTORE_B64` | `mykey.b64` 的完整内容 |
+   | `KSU_KEYSTORE_PASS` | keystore 密码 |
+   | `KSU_KEY_ALIAS` | 例如 `mymask` |
+
+3. 运行时把 `use_fixed_key` 打开，之后每次都是同一签名；
+   `SIGNATURE.txt` 里的哈希也固定，内核只需编一次。
+
+关掉 `use_fixed_key` 就回到「每次全新私钥」模式。
+
 ## 安全
 
 - 二次分发请遵守 KernelSU 的 GPL-3.0 许可。
