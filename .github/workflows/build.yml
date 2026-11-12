@@ -203,7 +203,7 @@ jobs:
           git clone --depth 1 --branch "$KSU_REF" --filter=blob:none --sparse \
             https://github.com/tiann/KernelSU.git ksu-src
           cd ksu-src
-          git sparse-checkout set kernel
+          git sparse-checkout set kernel uapi
 
       - name: 编译 kernelsu.ko（写入本次独家签名）
         env:
