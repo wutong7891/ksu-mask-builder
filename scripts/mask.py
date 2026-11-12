@@ -184,7 +184,7 @@ def cmd_fetch(args) -> None:
             shutil.rmtree(dest)
         run(["git", "clone", "--depth", "1", "--branch", ref, KSU_REPO, str(dest)], capture=True)
 
-    run(["git", "sparse-checkout", "set", "manager", "kernel"], cwd=dest, capture=True)
+    run(["git", "sparse-checkout", "set", "manager", "kernel", "uapi"], cwd=dest, capture=True)
     # 版本号由 gradle 用 git 计算，这里补一个轻量 tag 保证 describe 一定能用
     run(["git", "fetch", "--tags", "--depth", "1", "origin"], cwd=dest, check=False, capture=True)
     desc = run(["git", "describe", "--tags", "--always"], cwd=dest, capture=True, check=False)
@@ -399,7 +399,8 @@ def cmd_build(args) -> None:
     ]
     proc = subprocess.run(cmd, cwd=str(manager), env=env, text=True,
                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    print(proc.stdout)
+    # gradle 日志一律走 stderr，避免污染 $GITHUB_OUTPUT
+    print(proc.stdout, file=sys.stderr, flush=True)
     if proc.returncode != 0:
         raise ToolError(f"gradle 构建失败（{proc.returncode}），详见上方日志")
 
