@@ -1,0 +1,13 @@
+包名        : com.mask.ksu
+应用名      : 面具
+版本        : 1.0.1 (69668)
+证书 SHA256 : 7ea904b17d0e08b25c571467f27afc60c7d21203fcbf4f5bb9c6855dd3c0580d
+证书大小    : 0x055d
+APK SHA256  : 67c572092879996e968d885e71035c06eb2c218b68c0381998c95543cc157882
+APK 大小    : 13634234 bytes
+KernelSU    : v3.3.1
+
+内核侧编译参数（内置 KSU 或 LKM 都必须一致）：
+  KSU_PACKAGE_NAME=com.mask.ksu
+  KSU_EXPECTED_SIZE=0x055d
+  KSU_EXPECTED_HASH=7ea904b17d0e08b25c571467f27afc60c7d21203fcbf4f5bb9c6855dd3c0580d
