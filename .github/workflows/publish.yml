@@ -1,0 +1,58 @@
+name: 发布 APK 到分支
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "要发布的运行 ID（留空=最近一次成功运行）"
+        required: false
+        type: string
+        default: ""
+      artifact:
+        description: "要发布的产物名"
+        required: false
+        type: string
+        default: "mask-apk"
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: 下载构建产物
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.run_id }}
+          ARTIFACT: ${{ inputs.artifact }}
+        run: |
+          set -euo pipefail
+          if [ -z "$RUN_ID" ]; then
+            RUN_ID=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow build.yml \
+              --status success --limit 1 --json databaseId --jq '.[0].databaseId')
+          fi
+          echo "run=$RUN_ID artifact=$ARTIFACT"
+          gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" -n "$ARTIFACT" -D dist
+          ls -l dist
+
+      - name: 推到 apk-artifacts 分支
+        run: |
+          set -euo pipefail
+          git config user.name "ksu-mask-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git checkout --orphan apk-artifacts
+          git rm -rf . --quiet || true
+          mkdir -p apk
+          cp dist/*.apk apk/
+          cp dist/SIGNATURE.txt dist/report.json apk/ 2>/dev/null || true
+          git add -f apk
+          git commit -m "apk: $(date -u +%Y%m%dT%H%M%SZ)"
+          git push -f origin apk-artifacts
+          ls -l apk
