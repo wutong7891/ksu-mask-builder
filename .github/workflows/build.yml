@@ -51,6 +51,11 @@ on:
         required: false
         type: boolean
         default: false
+      use_fixed_key:
+        description: "用仓库 Secrets 里的固定私钥签名（多次构建同一签名）"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -114,6 +119,10 @@ jobs:
           VERSION_NAME: ${{ inputs.version_name }}
           VERSION_CODE: ${{ inputs.version_code }}
           KSU_REF: ${{ steps.ref.outputs.KSU_REF }}
+          USE_FIXED_KEY: ${{ inputs.use_fixed_key }}
+          KSU_KEYSTORE_B64: ${{ secrets.KSU_KEYSTORE_B64 }}
+          KSU_KEYSTORE_PASS: ${{ secrets.KSU_KEYSTORE_PASS }}
+          KSU_KEY_ALIAS: ${{ secrets.KSU_KEY_ALIAS }}
         run: |
           set -euo pipefail
           python3 scripts/mask.py prepare \
