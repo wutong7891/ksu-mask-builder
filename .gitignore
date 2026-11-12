@@ -1,0 +1,13 @@
+# 构建中间产物
+ksu/
+dist/
+out/
+__pycache__/
+*.pyc
+
+# 私钥：绝对不要提交
+keys/
+*.jks
+*.keystore
+keystore.env
+key.jks

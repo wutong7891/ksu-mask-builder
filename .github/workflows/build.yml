@@ -1,0 +1,224 @@
+name: 一键改面具
+
+run-name: >-
+  KSU Mask · ${{ inputs.package_name }} · v${{ inputs.version_name }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      package_name:
+        description: "新包名 / applicationId（例：com.me.mask）"
+        required: true
+        type: string
+        default: "com.mask.ksu"
+      app_name:
+        description: "新应用名（桌面显示，例：面具）"
+        required: true
+        type: string
+        default: "面具"
+      version_name:
+        description: "版本名（例：1.0.0）"
+        required: true
+        type: string
+        default: "1.0.0"
+      version_code:
+        description: "版本号（纯数字，留空自动生成）"
+        required: false
+        type: string
+        default: ""
+      ksu_version:
+        description: "KernelSU 版本 tag（留空 = 最新 release）"
+        required: false
+        type: string
+        default: ""
+      build_lkm:
+        description: "同时编译各 KMI 的 kernelsu.ko（适配本次私钥）"
+        required: false
+        type: boolean
+        default: true
+      kmi_list:
+        description: "KMI 列表（逗号分隔）"
+        required: false
+        type: string
+        default: "android12-5.10,android13-5.15,android14-6.1,android15-6.6,android16-6.12"
+      ddk_release:
+        description: "DDK 内核镜像版本"
+        required: false
+        type: string
+        default: "20260828"
+
+permissions:
+  contents: read
+
+jobs:
+  mask:
+    name: 定制并编译面具 APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    outputs:
+      ksu_ref: ${{ steps.ref.outputs.KSU_REF }}
+      cert_sha256: ${{ steps.prep.outputs.CERT_SHA256 }}
+      cert_size_hex: ${{ steps.prep.outputs.CERT_SIZE_HEX }}
+      version_code: ${{ steps.prep.outputs.VERSION_CODE }}
+      kmi_matrix: ${{ steps.kmi.outputs.KMI_MATRIX }}
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v7
+
+      - name: 参数校验
+        env:
+          PACKAGE_NAME: ${{ inputs.package_name }}
+          APP_NAME: ${{ inputs.app_name }}
+          VERSION_NAME: ${{ inputs.version_name }}
+          VERSION_CODE: ${{ inputs.version_code }}
+        run: |
+          set -euo pipefail
+          python3 scripts/mask.py validate \
+            --pkg "$PACKAGE_NAME" --name "$APP_NAME" \
+            --version "$VERSION_NAME" --code "$VERSION_CODE" >> "$GITHUB_OUTPUT"
+
+      - name: 安装 JDK 21
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: 配置 Gradle 缓存
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: 解析 KernelSU 版本
+        id: ref
+        env:
+          KSU_VERSION: ${{ inputs.ksu_version }}
+        run: |
+          set -euo pipefail
+          python3 scripts/mask.py resolve-ref --input "$KSU_VERSION" | tee -a "$GITHUB_OUTPUT"
+
+      - name: 拉取 KernelSU 源码
+        env:
+          KSU_REF: ${{ steps.ref.outputs.KSU_REF }}
+        run: |
+          set -euo pipefail
+          python3 scripts/mask.py fetch --ref "$KSU_REF" --dest "$GITHUB_WORKSPACE/ksu"
+
+      - name: 生成私钥 + 改包名/名称/版本 + 内置 ksud
+        id: prep
+        env:
+          PACKAGE_NAME: ${{ inputs.package_name }}
+          APP_NAME: ${{ inputs.app_name }}
+          VERSION_NAME: ${{ inputs.version_name }}
+          VERSION_CODE: ${{ inputs.version_code }}
+          KSU_REF: ${{ steps.ref.outputs.KSU_REF }}
+        run: |
+          set -euo pipefail
+          python3 scripts/mask.py prepare \
+            --src ksu --keys keys \
+            --pkg "$PACKAGE_NAME" --name "$APP_NAME" \
+            --version "$VERSION_NAME" --code "$VERSION_CODE" \
+            --tag "$KSU_REF" | tee -a "$GITHUB_OUTPUT"
+
+      - name: 编译 APK
+        id: build
+        env:
+          PACKAGE_NAME: ${{ inputs.package_name }}
+          APP_NAME: ${{ inputs.app_name }}
+        run: |
+          set -euo pipefail
+          python3 scripts/mask.py build --src ksu --pkg "$PACKAGE_NAME" --name "$APP_NAME" \
+            | tee -a "$GITHUB_OUTPUT"
+
+      - name: 校验并输出产物
+        env:
+          PACKAGE_NAME: ${{ inputs.package_name }}
+          APP_NAME: ${{ inputs.app_name }}
+          VERSION_NAME: ${{ inputs.version_name }}
+          VERSION_CODE: ${{ steps.prep.outputs.VERSION_CODE }}
+          CERT_SHA256: ${{ steps.prep.outputs.CERT_SHA256 }}
+          CERT_SIZE_HEX: ${{ steps.prep.outputs.CERT_SIZE_HEX }}
+          KSU_REF: ${{ steps.ref.outputs.KSU_REF }}
+          BUILT_APK: ${{ steps.build.outputs.BUILT_APK }}
+        run: |
+          set -euo pipefail
+          python3 scripts/mask.py finalize \
+            --apk "$BUILT_APK" --out dist \
+            --pkg "$PACKAGE_NAME" --name "$APP_NAME" \
+            --version "$VERSION_NAME" --code "$VERSION_CODE" \
+            --cert-sha256 "$CERT_SHA256" --cert-size-hex "$CERT_SIZE_HEX" \
+            --ksu-ref "$KSU_REF"
+
+      - name: 解析 KMI 列表
+        id: kmi
+        env:
+          KMI_INPUT: ${{ inputs.kmi_list }}
+        run: |
+          set -euo pipefail
+          python3 scripts/mask.py kmi-list --input "$KMI_INPUT" | tee -a "$GITHUB_OUTPUT"
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v7
+        with:
+          name: mask-apk
+          path: |
+            dist/
+            keys/
+          if-no-files-found: error
+          retention-days: 30
+
+  lkm:
+    name: kernelsu.ko · ${{ matrix.kmi }}
+    needs: mask
+    if: ${{ inputs.build_lkm }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    container:
+      image: ghcr.io/ylarod/ddk-min:${{ matrix.kmi }}-${{ inputs.ddk_release }}
+      options: --privileged
+    strategy:
+      fail-fast: false
+      matrix:
+        kmi: ${{ fromJSON(needs.mask.outputs.kmi_matrix) }}
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v7
+
+      - name: 拉取内核源码
+        env:
+          KSU_REF: ${{ needs.mask.outputs.ksu_ref }}
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory '*'
+          rm -rf ksu-src
+          git clone --depth 1 --branch "$KSU_REF" --filter=blob:none --sparse \
+            https://github.com/tiann/KernelSU.git ksu-src
+          cd ksu-src
+          git sparse-checkout set kernel
+
+      - name: 编译 kernelsu.ko（写入本次独家签名）
+        env:
+          KSU_PACKAGE_NAME: ${{ inputs.package_name }}
+          KSU_EXPECTED_SIZE: ${{ needs.mask.outputs.cert_size_hex }}
+          KSU_EXPECTED_HASH: ${{ needs.mask.outputs.cert_sha256 }}
+          KMI: ${{ matrix.kmi }}
+        run: |
+          set -euo pipefail
+          cd ksu-src/kernel
+          echo "KMI=$KMI"
+          echo "KSU_PACKAGE_NAME=$KSU_PACKAGE_NAME"
+          echo "KSU_EXPECTED_SIZE=$KSU_EXPECTED_SIZE"
+          echo "KSU_EXPECTED_HASH=$KSU_EXPECTED_HASH"
+          CONFIG_KSU=m CC=clang make \
+            KSU_PACKAGE_NAME="$KSU_PACKAGE_NAME" \
+            KSU_EXPECTED_SIZE="$KSU_EXPECTED_SIZE" \
+            KSU_EXPECTED_HASH="$KSU_EXPECTED_HASH"
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          llvm-strip -d kernelsu.ko || true
+          cp kernelsu.ko "$GITHUB_WORKSPACE/out/${KMI}_kernelsu.ko"
+          ls -l "$GITHUB_WORKSPACE/out/"
+
+      - name: 上传 kernelsu.ko
+        uses: actions/upload-artifact@v7
+        with:
+          name: lkm-${{ matrix.kmi }}
+          path: out/*.ko
+          if-no-files-found: error
+          retention-days: 30
